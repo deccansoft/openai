@@ -1,0 +1,105 @@
+import { config } from "dotenv";
+import postgres from 'postgres'
+import OpenAI from "openai";
+ 
+config({ path: ".env.local" });
+ 
+// Connection string to the PostgreSQL database
+const connectionString = "postgresql://postgres.nnalijciffjswxgyywrn:Sandeep@75@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres"
+const sql = postgres(connectionString)
+// Connection string to the PostgreSQL database
+ 
+// Mock documents array with fun facts
+const MOCK_DOCS = [
+    { content: "A group of flamingos is called a 'flamboyance'.", name: "Fun Fact 1" },
+    { content: "Octopuses have three hearts.", name: "Fun Fact 2" },
+    { content: "Butterflies taste with their feet.", name: "Fun Fact 3" },
+    { content: "A snail can sleep for three years.", name: "Fun Fact 4" },
+    { content: "Elephants are the only animals that can't jump.", name: "Fun Fact 5" },
+    { content: "A rhinoceros' horn is made of hair.", name: "Fun Fact 6" },
+    { content: "Slugs have four noses.", name: "Fun Fact 7" },
+    { content: "A cow gives nearly 200,000 glasses of milk in a lifetime.", name: "Fun Fact 8" },
+    { content: "Bats are the only mammals that can fly.", name: "Fun Fact 9" },
+    { content: "Koalas sleep up to 22 hours a day.", name: "Fun Fact 10" }
+];
+ 
+// Create the vector extension if it doesn't exist
+await sql`
+    CREATE EXTENSION IF NOT EXISTS vector;
+`;
+ 
+// Create the documents table if it doesn't exist
+await sql`
+    CREATE TABLE IF NOT EXISTS "documents" (
+    "id" serial PRIMARY KEY NOT NULL,
+    "name" text NOT NULL,
+    "content" text NOT NULL,
+    "embedding" vector(256),
+    "created_at" timestamp DEFAULT now() NOT NULL,
+    "updated_at" timestamp DEFAULT now() NOT NULL
+    );
+`;
+ 
+// Create an index on the embedding column using hnsw and cosine similarity
+await sql`
+    CREATE INDEX IF NOT EXISTS "embedding_index" ON "documents" USING hnsw ("embedding" vector_cosine_ops);
+`;
+ 
+// Initialize OpenAI API client
+const openai = new OpenAI();
+ 
+// Generate embeddings for the content field using OpenAI API
+const response = await openai.embeddings.create({
+    model: "text-embedding-3-small",
+    dimensions: 256,
+    input: MOCK_DOCS.map((doc) => doc.content),
+});
+ 
+// Extract embeddings from the response
+const embeddings = response.data;
+ 
+// Check if there are any records in the documents table
+const sqlResponse = await sql`
+    SELECT count(*) as count FROM documents
+`;
+if (sqlResponse.count == 0) {
+    // Insert documents into the database
+    for (let i = 0; i < MOCK_DOCS.length; i++) {
+        const { name, content } = MOCK_DOCS[i];
+        const embedding = embeddings[i].embedding; // Assuming embeddings are returned in the same order
+ 
+        // Convert the embedding array to a PostgreSQL array format
+        const embeddingArray = `[${embedding.join(',')}]`;
+        // Insert the record
+        await sql`
+            INSERT INTO documents (name, content, embedding)
+            VALUES (${name}, ${content}, ${embeddingArray}::vector)
+    `;
+    }
+    console.log('Records inserted successfully');
+}
+ 
+export async function generateEmbeddings(texts) {
+    const response = await openai.embeddings.create({
+        model: "text-embedding-3-small",
+        dimensions: 256,
+        input: texts
+    });
+    return response.data.map((item) => item.embedding);
+}
+ 
+export async function retrieveDocuments(query, limit = 1) {
+    const embeddings = await generateEmbeddings([query]);
+    const embedding = embeddings[0];
+    const embeddingArray = `[${embedding.join(',')}]`;
+    const documents = await sql`
+        SELECT *, 1 - cosine_distance(embedding, ${embeddingArray}::vector) AS similarity
+        FROM documents
+        ORDER BY similarity DESC
+        LIMIT ${limit}
+    `;
+    console.log(documents);
+    return documents;
+}
+ 
+retrieveDocuments("Tell me about rhinoceros");
